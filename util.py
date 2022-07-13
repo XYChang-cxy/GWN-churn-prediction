@@ -15,8 +15,8 @@ class DataLoader(object):
         :param pad_with_last_sample: pad with the last sample to make number of samples divisible to batch_size.
         """
         self.batch_size = batch_size
-        self.current_ind = 0
-        if pad_with_last_sample:
+        self.current_ind = 0  # 当前batch的索引index
+        if pad_with_last_sample:  # 用最后一个样本填充，使样本可以被batch_size整除
             num_padding = (batch_size - (len(xs) % batch_size)) % batch_size
             x_padding = np.repeat(xs[-1:], num_padding, axis=0)
             y_padding = np.repeat(ys[-1:], num_padding, axis=0)
@@ -27,13 +27,13 @@ class DataLoader(object):
         self.xs = xs
         self.ys = ys
 
-    def shuffle(self):
-        permutation = np.random.permutation(self.size)
+    def shuffle(self):  # 打乱样本
+        permutation = np.random.permutation(self.size)  # 打乱下标
         xs, ys = self.xs[permutation], self.ys[permutation]
         self.xs = xs
         self.ys = ys
 
-    def get_iterator(self):
+    def get_iterator(self):  # 返回迭代器，每调用一次迭代器返回新的一个batch的数据
         self.current_ind = 0
 
         def _wrapper():
@@ -46,6 +46,7 @@ class DataLoader(object):
                 self.current_ind += 1
 
         return _wrapper()
+
 
 class StandardScaler():
     """
@@ -123,17 +124,17 @@ def load_pickle(pickle_file):
 
 def load_adj(pkl_filename, adjtype):
     sensor_ids, sensor_id_to_ind, adj_mx = load_pickle(pkl_filename)
-    if adjtype == "scalap":
+    if adjtype == "scalap":  # ??????????????
         adj = [calculate_scaled_laplacian(adj_mx)]
-    elif adjtype == "normlap":
+    elif adjtype == "normlap":  # 标准化的拉普拉斯矩阵 L = I - D^-1/2 A D^-1/2
         adj = [calculate_normalized_laplacian(adj_mx).astype(np.float32).todense()]
-    elif adjtype == "symnadj":
+    elif adjtype == "symnadj":  # 对称的标准化的邻接矩阵
         adj = [sym_adj(adj_mx)]
-    elif adjtype == "transition":
+    elif adjtype == "transition":  # 无向图：转移矩阵P
         adj = [asym_adj(adj_mx)]
-    elif adjtype == "doubletransition":
+    elif adjtype == "doubletransition":  # 有向图：前向转移矩阵Pf和后向转移矩阵Pb
         adj = [asym_adj(adj_mx), asym_adj(np.transpose(adj_mx))]
-    elif adjtype == "identity":
+    elif adjtype == "identity":  # 单位矩阵，无路网信息
         adj = [np.diag(np.ones(adj_mx.shape[0])).astype(np.float32)]
     else:
         error = 0

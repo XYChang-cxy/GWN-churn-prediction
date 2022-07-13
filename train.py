@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from engine import trainer
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--device',type=str,default='cuda:3',help='')
+parser.add_argument('--device',type=str,default='cuda:0',help='')  # cuda:3时报错，只有一个GPU
 parser.add_argument('--data',type=str,default='data/METR-LA',help='data path')
 parser.add_argument('--adjdata',type=str,default='data/sensor_graph/adj_mx.pkl',help='adj data path')
 parser.add_argument('--adjtype',type=str,default='doubletransition',help='adj type')
@@ -40,19 +40,24 @@ def main():
     #np.random.seed(args.seed)
     #load data
     device = torch.device(args.device)
-    sensor_ids, sensor_id_to_ind, adj_mx = util.load_adj(args.adjdata,args.adjtype)
+
+    # args.adjdata: 监测器的网络邻接矩阵文件；args.adjtype: 邻接矩阵类型，默认doubletransition（两个转移矩阵）
+    sensor_ids, sensor_id_to_ind, adj_mx = util.load_adj(args.adjdata,args.adjtype)  # ##########adj_mx: 邻接矩阵，这里是Pf和Pb两个转移矩阵
+
+    # util.load_dataset: 加载数据集，返回字典，包含train_loader,val_loader,test_loader（DataLoader类型）和scaler（StandardScaler类型）
+    # args.data: 存储数据的文件夹，默认METR-LA；args.batch_size: 训练/验证/测试集的批处理大小，默认64
     dataloader = util.load_dataset(args.data, args.batch_size, args.batch_size, args.batch_size)
-    scaler = dataloader['scaler']
-    supports = [torch.tensor(i).to(device) for i in adj_mx]
+    scaler = dataloader['scaler']  # 根据训练集的mean和std确定的scaler，用于统一标准化和逆标准化
+    supports = [torch.tensor(i).to(device) for i in adj_mx]  # 包含Pf和Pb的列表，后续会加入addaptadj
 
     print(args)
 
-    if args.randomadj:
+    if args.randomadj:  # 随机初始化自适应邻接矩阵，adjinit即gwnet的初始化参数aptinit
         adjinit = None
     else:
         adjinit = supports[0]
 
-    if args.aptonly:
+    if args.aptonly:  # 如果路网信息未知，仅使用自适应邻接矩阵
         supports = None
 
 
@@ -63,9 +68,11 @@ def main():
 
 
     print("start training...",flush=True)
-    his_loss =[]
-    val_time = []
-    train_time = []
+    his_loss =[]  # 存储验证集的平均loss
+    val_time = []  # 存储每个epoch中验证集评估的时间
+    train_time = []  # 存储每个epoch中训练集训练的时间
+
+    # 两层嵌套的循环，外层是epochs轮，每轮有若干batch
     for i in range(1,args.epochs+1):
         #if i % 10 == 0:
             #lr = max(0.000002,args.learning_rate * (0.1 ** (i // 10)))
@@ -76,12 +83,17 @@ def main():
         train_rmse = []
         t1 = time.time()
         dataloader['train_loader'].shuffle()
-        for iter, (x, y) in enumerate(dataloader['train_loader'].get_iterator()):
+        # enumerate() 函数用于将一个可遍历的数据对象(如列表、元组或字符串)组合为一个索引序列，同时列出数据下标和数据
+        for iter, (x, y) in enumerate(dataloader['train_loader'].get_iterator()):  # (x,y) 是一个batch的数据
+            # x: (batch_size, input_length, num_nodes, input_dim)
+            # y: (batch_size, output_length, num_nodes, output_dim)
             trainx = torch.Tensor(x).to(device)
             trainx= trainx.transpose(1, 3)
             trainy = torch.Tensor(y).to(device)
             trainy = trainy.transpose(1, 3)
-            metrics = engine.train(trainx, trainy[:,0,:,:])
+            # trainx: (batch_size, input_dim, num_nodes, input_length)   即 (n,c,v,l)
+            # trainy: (batch_size, output_dim, num_nodes, output_length)
+            metrics = engine.train(trainx, trainy[:,0,:,:])  # 预测时仅预测速度！trainy[:,0,:,:]: (batch_size, num_nodes, output_length)
             train_loss.append(metrics[0])
             train_mape.append(metrics[1])
             train_rmse.append(metrics[2])
@@ -126,23 +138,23 @@ def main():
     print("Average Inference Time: {:.4f} secs".format(np.mean(val_time)))
 
     #testing
-    bestid = np.argmin(his_loss)
+    bestid = np.argmin(his_loss)  # 获取loss值最小时对应的下标
     engine.model.load_state_dict(torch.load(args.save+"_epoch_"+str(bestid+1)+"_"+str(round(his_loss[bestid],2))+".pth"))
 
 
     outputs = []
     realy = torch.Tensor(dataloader['y_test']).to(device)
-    realy = realy.transpose(1,3)[:,0,:,:]
+    realy = realy.transpose(1,3)[:,0,:,:]  # realy: (num_samples, num_nodes, output_length)
 
     for iter, (x, y) in enumerate(dataloader['test_loader'].get_iterator()):
         testx = torch.Tensor(x).to(device)
         testx = testx.transpose(1,3)
-        with torch.no_grad():
+        with torch.no_grad():  # 在该模块下，所有计算得出的tensor的requires_grad都自动设置为False,反向传播时就不会自动求导了，因此大大节约了显存或者说内存
             preds = engine.model(testx).transpose(1,3)
-        outputs.append(preds.squeeze())
+        outputs.append(preds.squeeze())  # squeeze: 删除张量中维数为1的维度，preds.squeeze(): (batch_size, num_nodes, output_length)
 
     yhat = torch.cat(outputs,dim=0)
-    yhat = yhat[:realy.size(0),...]
+    yhat = yhat[:realy.size(0),...]  # yhat: (num_samples,num_nodes,output_length)
 
 
     print("Training finished")
@@ -152,7 +164,7 @@ def main():
     amae = []
     amape = []
     armse = []
-    for i in range(12):
+    for i in range(12):  # 12: seq_length
         pred = scaler.inverse_transform(yhat[:,:,i])
         real = realy[:,:,i]
         metrics = util.metric(pred,real)
