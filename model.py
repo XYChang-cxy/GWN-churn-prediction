@@ -10,7 +10,7 @@ class nconv(nn.Module):
         super(nconv,self).__init__()
 
     def forward(self,x, A):
-        x = torch.einsum('ncvl,vw->ncwl',(x,A))  # 爱因斯坦求和简记法 \sum_v x_{ncvl}A_{vw} = o_{ncwl}, 即A^Tx  ??????????????????
+        x = torch.einsum('ncvl,nlvw->ncwl',(x,A))  # 爱因斯坦求和简记法 \sum_{n,l,v} x_{ncvl}A_{nlvw} = o_{ncwl}, 即A^Tx  ??????????????????
         return x.contiguous() # torch.contiguous()方法首先拷贝了一份张量在内存中的地址，然后将地址按照形状改变后的张量的语义进行排列。
 
 class linear(nn.Module):
@@ -33,9 +33,11 @@ class gcn(nn.Module):
         self.dropout = dropout
         self.order = order  # order即式子中的K
 
-    def forward(self,x,support):  # x: 图信号
+    def forward(self,x,supports_list):  # x: 图信号
         out = [x]
-        for a in support:  # out = [x,P_fx,P_f^2x,...,P_f^K,P_bx,P_b^2x,...,P_b^Kx,A_{adp}x,A_{adp}^2x,...,A_{adp}^Kx]
+
+        # a: P_f、P_b、A_{adp} -- (n,l,v,w) <==> (batch_size, input_length, adj_mx_x, adj_mx_y) ?????????????????
+        for a in supports_list:  # out = [x,P_fx,P_f^2x,...,P_f^K,P_bx,P_b^2x,...,P_b^Kx,A_{adp}x,A_{adp}^2x,...,A_{adp}^Kx]
             x1 = self.nconv(x,a)
             out.append(x1)
             for k in range(2, self.order + 1):
@@ -52,7 +54,8 @@ class gcn(nn.Module):
 class gwnet(nn.Module):
     # device: 训练设备
     # num_nodes: 节点数
-    def __init__(self, device, num_nodes, dropout=0.3, supports=None, gcn_bool=True, addaptadj=True, aptinit=None, in_dim=2,out_dim=12,residual_channels=32,dilation_channels=32,skip_channels=256,end_channels=512,kernel_size=2,blocks=4,layers=2):
+    # 删除 supports
+    def __init__(self, device, num_nodes, dropout=0.3, supports_len=2, gcn_bool=True, addaptadj=False, aptinit=None, in_dim=8,out_dim=18,residual_channels=32,dilation_channels=32,skip_channels=256,end_channels=512,kernel_size=2,blocks=4,layers=2):
         super(gwnet, self).__init__()
         self.dropout = dropout
         self.blocks = blocks  # 块数，一个块有多个layers
@@ -70,31 +73,28 @@ class gwnet(nn.Module):
         self.start_conv = nn.Conv2d(in_channels=in_dim,
                                     out_channels=residual_channels,
                                     kernel_size=(1,1))  # 初始Linear层
-        self.supports = supports
 
         receptive_field = 1  # 感受野
 
-        self.supports_len = 0
-        if supports is not None:
-            self.supports_len += len(supports)
+        self.supports_len = supports_len
 
-        if gcn_bool and addaptadj:
-            if aptinit is None:
-                if supports is None:
-                    self.supports = []
-                # 论文中的E1和E2，用于自适应邻接矩阵的初始化
-                self.nodevec1 = nn.Parameter(torch.randn(num_nodes, 10).to(device), requires_grad=True).to(device)  # source node embedding
-                self.nodevec2 = nn.Parameter(torch.randn(10, num_nodes).to(device), requires_grad=True).to(device)  # target node embedding
-                self.supports_len +=1  # 使用自适应邻接矩阵，转移矩阵数+1
-            else:
-                if supports is None:
-                    self.supports = []
-                m, p, n = torch.svd(aptinit)
-                initemb1 = torch.mm(m[:, :10], torch.diag(p[:10] ** 0.5))######################################
-                initemb2 = torch.mm(torch.diag(p[:10] ** 0.5), n[:, :10].t())
-                self.nodevec1 = nn.Parameter(initemb1, requires_grad=True).to(device)
-                self.nodevec2 = nn.Parameter(initemb2, requires_grad=True).to(device)
-                self.supports_len += 1
+        # if gcn_bool and addaptadj:
+        #     if aptinit is None:
+        #         if supports is None:
+        #             self.supports = []
+        #         # 论文中的E1和E2，用于自适应邻接矩阵的初始化
+        #         self.nodevec1 = nn.Parameter(torch.randn(num_nodes, 10).to(device), requires_grad=True).to(device)  # source node embedding
+        #         self.nodevec2 = nn.Parameter(torch.randn(10, num_nodes).to(device), requires_grad=True).to(device)  # target node embedding
+        #         self.supports_len +=1  # 使用自适应邻接矩阵，转移矩阵数+1
+        #     else:
+        #         if supports is None:
+        #             self.supports = []
+        #         m, p, n = torch.svd(aptinit)
+        #         initemb1 = torch.mm(m[:, :10], torch.diag(p[:10] ** 0.5))######################################
+        #         initemb2 = torch.mm(torch.diag(p[:10] ** 0.5), n[:, :10].t())
+        #         self.nodevec1 = nn.Parameter(initemb1, requires_grad=True).to(device)
+        #         self.nodevec2 = nn.Parameter(initemb2, requires_grad=True).to(device)
+        #         self.supports_len += 1
 
 
 
@@ -143,8 +143,10 @@ class gwnet(nn.Module):
         self.receptive_field = receptive_field  # 感受野
 
 
-    # input.shape = (n,c,v,l),n是批处理数量,c是in_channels,v是节点数,l是输入数据的时间长度##########################
-    def forward(self, input):
+    # input.shape = (n,c,v,l),n是批处理数量,c是in_channels,v是节点数,l是输入数据的时间长度
+    def forward(self, input, supports=None):
+        if supports == None:
+            supports = []
         in_len = input.size(3)
         if in_len<self.receptive_field:  # 输入的长度小于感受野时，对其进行左填充
             x = nn.functional.pad(input,(self.receptive_field-in_len,0,0,0))
@@ -155,9 +157,9 @@ class gwnet(nn.Module):
 
         # calculate the current adaptive adj matrix once per iteration
         new_supports = None
-        if self.gcn_bool and self.addaptadj and self.supports is not None:
+        if self.gcn_bool and self.addaptadj and supports is not None:
             adp = F.softmax(F.relu(torch.mm(self.nodevec1, self.nodevec2)), dim=1)
-            new_supports = self.supports + [adp]
+            new_supports = supports + [adp]
 
         # WaveNet layers
         for i in range(self.blocks * self.layers):
@@ -188,22 +190,24 @@ class gwnet(nn.Module):
             s = x
             s = self.skip_convs[i](s)
             try:
-                skip = skip[:, :, :,  -s.size(3):]  #############################？？？？？？
+                skip = skip[:, :, :,  -s.size(3):]  # 随着扩张卷积次数增加，output_length不断减少，最后减为1
             except:
                 skip = 0
             skip = s + skip
 
+            for j in range(len(supports)):
+                supports[j] = supports[j][:, -x.size(3):, :, :]  # 更新对应的转移矩阵时间节点数
+            # print(supports[0].shape)
 
-            if self.gcn_bool and self.supports is not None:
+            if self.gcn_bool and supports is not None:
                 if self.addaptadj:
                     x = self.gconv[i](x, new_supports)
                 else:
-                    x = self.gconv[i](x,self.supports)
+                    x = self.gconv[i](x,supports)
             else:
                 x = self.residual_convs[i](x)
 
-            x = x + residual[:, :, :, -x.size(3):]  ####################################？？？？？
-
+            x = x + residual[:, :, :, -x.size(3):]  # 随着扩张卷积次数增加，output_length不断减少，最后减为1
 
             x = self.bn[i](x)
 

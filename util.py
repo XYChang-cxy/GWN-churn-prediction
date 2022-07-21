@@ -7,7 +7,7 @@ from scipy.sparse import linalg
 
 
 class DataLoader(object):
-    def __init__(self, xs, ys, batch_size, pad_with_last_sample=True):
+    def __init__(self, xs, ys, adjs, batch_size, pad_with_last_sample=True):
         """
         :param xs:
         :param ys:
@@ -20,18 +20,22 @@ class DataLoader(object):
             num_padding = (batch_size - (len(xs) % batch_size)) % batch_size
             x_padding = np.repeat(xs[-1:], num_padding, axis=0)
             y_padding = np.repeat(ys[-1:], num_padding, axis=0)
+            adjs_padding = np.repeat(adjs[-1:], num_padding, axis=0)
             xs = np.concatenate([xs, x_padding], axis=0)
             ys = np.concatenate([ys, y_padding], axis=0)
+            adjs = np.concatenate([adjs,adjs_padding],axis=0)
         self.size = len(xs)
         self.num_batch = int(self.size // self.batch_size)
         self.xs = xs
         self.ys = ys
+        self.adjs = adjs
 
     def shuffle(self):  # 打乱样本
         permutation = np.random.permutation(self.size)  # 打乱下标
-        xs, ys = self.xs[permutation], self.ys[permutation]
+        xs, ys, adjs = self.xs[permutation], self.ys[permutation], self.adjs[permutation]
         self.xs = xs
         self.ys = ys
+        self.adjs = adjs
 
     def get_iterator(self):  # 返回迭代器，每调用一次迭代器返回新的一个batch的数据
         self.current_ind = 0
@@ -42,7 +46,8 @@ class DataLoader(object):
                 end_ind = min(self.size, self.batch_size * (self.current_ind + 1))
                 x_i = self.xs[start_ind: end_ind, ...]
                 y_i = self.ys[start_ind: end_ind, ...]
-                yield (x_i, y_i)
+                adj_i = self.adjs[start_ind: end_ind, ...]
+                yield (x_i, y_i, adj_i)
                 self.current_ind += 1
 
         return _wrapper()
@@ -76,9 +81,9 @@ def sym_adj(adj):
 
 def asym_adj(adj):
     adj = sp.coo_matrix(adj)
-    rowsum = np.array(adj.sum(1)).flatten()
+    rowsum = np.array(adj.sum(1), dtype=np.float32).flatten()
     d_inv = np.power(rowsum, -1).flatten()
-    d_inv[np.isinf(d_inv)] = 0.
+    d_inv[np.isinf(d_inv)] = 0.  # numpy 除法，分母为0时自动处理为inf
     d_mat= sp.diags(d_inv)
     return d_mat.dot(adj).astype(np.float32).todense()
 
@@ -142,20 +147,46 @@ def load_adj(pkl_filename, adjtype):
     return sensor_ids, sensor_id_to_ind, adj
 
 
+# def load_dataset(dataset_dir, batch_size, valid_batch_size= None, test_batch_size=None):
+#     data = {}
+#     for category in ['train', 'val', 'test']:
+#         cat_data = np.load(os.path.join(dataset_dir, category + '.npz'))
+#         data['x_' + category] = cat_data['x']
+#         data['y_' + category] = cat_data['y']
+#     scaler = StandardScaler(mean=data['x_train'][..., 0].mean(), std=data['x_train'][..., 0].std())
+#     # Data format
+#     for category in ['train', 'val', 'test']:
+#         data['x_' + category][..., 0] = scaler.transform(data['x_' + category][..., 0])
+#     data['train_loader'] = DataLoader(data['x_train'], data['y_train'], batch_size)
+#     data['val_loader'] = DataLoader(data['x_val'], data['y_val'], valid_batch_size)
+#     data['test_loader'] = DataLoader(data['x_test'], data['y_test'], test_batch_size)
+#     data['scaler'] = scaler
+#     return data
+
 def load_dataset(dataset_dir, batch_size, valid_batch_size= None, test_batch_size=None):
     data = {}
     for category in ['train', 'val', 'test']:
         cat_data = np.load(os.path.join(dataset_dir, category + '.npz'))
         data['x_' + category] = cat_data['x']
         data['y_' + category] = cat_data['y']
-    scaler = StandardScaler(mean=data['x_train'][..., 0].mean(), std=data['x_train'][..., 0].std())
+        data['p_'+category] = cat_data['p']  #  转移矩阵
+    scaler_list = []
+    for i in range(data['x_train'].shape[-1]):
+        scaler = StandardScaler(mean=data['x_train'][..., i].mean(), std=data['x_train'][..., i].std())
+        scaler_list.append(scaler)
+    activity_array = 2 * data['x_train'][...,0] + data['x_train'][...,1] + 3 * data['x_train'][...,2] + \
+                     5 * data['x_train'][...,3] + 4 * data['x_train'][...,4]
+    activity_scaler = StandardScaler(mean=activity_array.mean(), std=activity_array.std())
+
     # Data format
     for category in ['train', 'val', 'test']:
-        data['x_' + category][..., 0] = scaler.transform(data['x_' + category][..., 0])
-    data['train_loader'] = DataLoader(data['x_train'], data['y_train'], batch_size)
-    data['val_loader'] = DataLoader(data['x_val'], data['y_val'], valid_batch_size)
-    data['test_loader'] = DataLoader(data['x_test'], data['y_test'], test_batch_size)
-    data['scaler'] = scaler
+        for i in range(data['x_train'].shape[-1]):
+            data['x_' + category][..., i] = scaler_list[i].transform(data['x_' + category][..., i])
+    data['train_loader'] = DataLoader(data['x_train'], data['y_train'],data['p_train'], batch_size)
+    data['val_loader'] = DataLoader(data['x_val'], data['y_val'], data['p_val'], valid_batch_size)
+    data['test_loader'] = DataLoader(data['x_test'], data['y_test'], data['p_test'], test_batch_size)
+    data['scaler_list'] = scaler_list
+    data['activity_scaler'] = activity_scaler
     return data
 
 def masked_mse(preds, labels, null_val=np.nan):

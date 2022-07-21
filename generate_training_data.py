@@ -89,14 +89,14 @@ def generate_train_val_test(args):
             os.path.join(args.output_dir, f"{cat}.npz"),
             x=_x,
             y=_y,
-            x_offsets=x_offsets.reshape(list(x_offsets.shape) + [1]),
+            x_offsets=x_offsets.reshape(list(x_offsets.shape) + [1]),  # 设定key为x_offsets
             y_offsets=y_offsets.reshape(list(y_offsets.shape) + [1]),
         )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output_dir", type=str, default="data/METR-LA", help="Output directory.")
+    parser.add_argument("--output_dir", type=str, default="data/REPO-8649239", help="Output directory.")
     parser.add_argument("--traffic_df_filename", type=str, default="data/metr-la.h5", help="Raw traffic readings.",)
     parser.add_argument("--seq_length_x", type=int, default=12, help="Sequence Length.",)
     parser.add_argument("--seq_length_y", type=int, default=12, help="Sequence Length.",)
