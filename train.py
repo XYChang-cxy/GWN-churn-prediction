@@ -10,6 +10,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--device',type=str,default='cuda:0',help='')  # cuda:3时报错，只有一个GPU
 parser.add_argument('--data',type=str,default='train_data/REPO-8649239/input_data',help='data path')
 # parser.add_argument('--adjdata',type=str,default='data/sensor_graph/adj_mx.pkl',help='adj data path')
+parser.add_argument('--predict_type',type=str,default='activity',help='model output type')  # activity/churn 对活跃度或是否流失进行预测
+parser.add_argument('--binary_threshold',type=float,default=0.15,help='threshold for binary classification')
 parser.add_argument('--adjtype',type=str,default='transition',help='adj type')  # 开发者协作网络是无向图，默认一个转移矩阵
 parser.add_argument('--gcn_bool',action='store_true',help='whether to add graph convolution layer')
 parser.add_argument('--aptonly',action='store_true',help='whether only adaptive adj')
@@ -26,7 +28,7 @@ parser.add_argument('--dropout',type=float,default=0.3,help='dropout rate')
 parser.add_argument('--weight_decay',type=float,default=0.0001,help='weight decay rate')
 parser.add_argument('--epochs',type=int,default=100,help='')
 parser.add_argument('--print_every',type=int,default=1,help='')
-#parser.add_argument('--seed',type=int,default=99,help='random seed')
+parser.add_argument('--seed',type=int,default=99,help='random seed')
 parser.add_argument('--save',type=str,default='./garage/mindspore',help='save path')
 parser.add_argument('--expid',type=int,default=1,help='experiment id')
 
@@ -44,9 +46,9 @@ def main():
 
     # util.load_dataset: 加载数据集，返回字典，包含train_loader,val_loader,test_loader（DataLoader类型）和scaler（StandardScaler类型）
     # args.data: 存储数据的文件夹，默认METR-LA；args.batch_size: 训练/验证/测试集的批处理大小，默认64
-    dataloader = util.load_dataset(args.data, args.batch_size, args.batch_size, args.batch_size)
+    dataloader = util.load_dataset(args.data, args.batch_size, args.batch_size, args.batch_size, args.predict_type)
     # scaler_list = dataloader['scaler_list']  # 根据训练集的mean和std确定的scaler，用于统一标准化和逆标准化
-    activity_scaler = dataloader['activity_scaler']
+    y_scaler = dataloader['y_scaler']
     # supports = [torch.tensor(i).to(device) for i in adj_mx]
 
     print(args)
@@ -59,14 +61,19 @@ def main():
     #     supports = None
 
     adjinit = None
+    threshold = args.binary_threshold
     if args.adjtype == "doubletransition":
         supports_len = 2
     else:
         supports_len = 1
 
-    engine = trainer(activity_scaler, args.in_dim, args.seq_length_y, args.num_nodes, args.nhid, args.dropout,
+    if args.predict_type == 'activity':
+        output_length = args.seq_length_y
+    else:
+        output_length = 1
+    engine = trainer(y_scaler, args.in_dim, output_length, args.num_nodes, args.nhid, args.dropout,
                      args.learning_rate, args.weight_decay, device, supports_len, args.gcn_bool, args.addaptadj,
-                     adjinit)
+                     adjinit,args.predict_type,threshold)
 
 
     print("start training...",flush=True)
@@ -83,10 +90,11 @@ def main():
         train_loss = []
         train_mape = []
         train_rmse = []
+        train_acc, train_precision, train_recall = [], [], []
         t1 = time.time()
         dataloader['train_loader'].shuffle()
         # enumerate() 函数用于将一个可遍历的数据对象(如列表、元组或字符串)组合为一个索引序列，同时列出数据下标和数据
-        for iter, (x, y, p) in enumerate(dataloader['train_loader'].get_iterator()):  # (x,y) 是一个batch的数据
+        for iter, (x, y, p, mask) in enumerate(dataloader['train_loader'].get_iterator()):  # (x,y) 是一个batch的数据
             # x: (batch_size, input_length, num_nodes, input_dim)
             # y: (batch_size, output_length, num_nodes, output_dim)
             trainx = torch.Tensor(x).to(device)
@@ -95,50 +103,93 @@ def main():
             trainy = trainy.transpose(1, 3)
             # trainx: (batch_size, input_dim, num_nodes, input_length)   即 (n,c,v,l)
             # trainy: (batch_size, output_dim, num_nodes, output_length)
+            train_mask = torch.Tensor(mask).to(device)
+            train_mask = train_mask.transpose(1, 3)
             trainp = torch.Tensor(p).to(device)
             supports = [trainp]
-            metrics = engine.train(trainx,supports,trainy[:,0,:,:])  # 预测时仅预测活跃度！trainy[:,0,:,:]: (batch_size, num_nodes, output_length)
-            train_loss.append(metrics[0])
-            train_mape.append(metrics[1])
-            train_rmse.append(metrics[2])
-            if iter % args.print_every == 0 :
-                log = 'Iter: {:03d}, Train Loss: {:.4f}, Train MAPE: {:.4f}, Train RMSE: {:.4f}'
-                print(log.format(iter, train_loss[-1], train_mape[-1], train_rmse[-1]),flush=True)
+
+            metrics = engine.train(trainx,supports,trainy[:,0,:,:],train_mask)  # 预测时仅预测活跃度！trainy[:,0,:,:]: (batch_size, num_nodes, output_length)
+            if args.predict_type == 'activity':
+                train_loss.append(metrics[0])
+                train_mape.append(metrics[1])
+                train_rmse.append(metrics[2])
+                if iter % args.print_every == 0:
+                    log = 'Iter: {:03d}, Train Loss: {:.4f}, Train MAPE: {:.4f}, Train RMSE: {:.4f}'
+                    print(log.format(iter, train_loss[-1], train_mape[-1], train_rmse[-1]), flush=True)
+            else:
+                train_loss.append(metrics[0])
+                train_acc.append(metrics[1])
+                train_precision.append(metrics[2])
+                train_recall.append(metrics[3])
+                if iter % args.print_every == 0:
+                    log = 'Iter: {:03d}, Train Loss: {:.4f}, Train Accuracy: {:.4f}, Train Precision: {:.4f}, ' \
+                          'Train Recall: {:.4f}'
+                    print(log.format(iter, train_loss[-1], train_acc[-1], train_precision[-1], train_recall[-1]),
+                          flush=True)
+
         t2 = time.time()
         train_time.append(t2-t1)
         #validation
         valid_loss = []
         valid_mape = []
         valid_rmse = []
+        valid_acc, valid_precision, valid_recall = [], [], []
 
 
         s1 = time.time()
-        for iter, (x, y, p) in enumerate(dataloader['val_loader'].get_iterator()):
+        for iter, (x, y, p, mask) in enumerate(dataloader['val_loader'].get_iterator()):
             testx = torch.Tensor(x).to(device)
             testx = testx.transpose(1, 3)
             testy = torch.Tensor(y).to(device)
             testy = testy.transpose(1, 3)
+            test_mask = torch.Tensor(mask).to(device)
+            test_mask = test_mask.transpose(1, 3)
             testp = torch.Tensor(p).to(device)
             supports = [testp]
-            metrics = engine.eval(testx, supports, testy[:,0,:,:])
-            valid_loss.append(metrics[0])
-            valid_mape.append(metrics[1])
-            valid_rmse.append(metrics[2])
+            metrics = engine.eval(testx, supports, testy[:,0,:,:], test_mask)
+            if args.predict_type == 'activity':
+                valid_loss.append(metrics[0])
+                valid_mape.append(metrics[1])
+                valid_rmse.append(metrics[2])
+            else:
+                valid_loss.append(metrics[0])
+                valid_acc.append(metrics[1])
+                valid_precision.append(metrics[2])
+                valid_recall.append(metrics[3])
         s2 = time.time()
         log = 'Epoch: {:03d}, Inference Time: {:.4f} secs'
         print(log.format(i,(s2-s1)))
         val_time.append(s2-s1)
-        mtrain_loss = np.mean(train_loss)
-        mtrain_mape = np.mean(train_mape)
-        mtrain_rmse = np.mean(train_rmse)
+        if args.predict_type == 'activity':
+            mtrain_loss = np.mean(train_loss)
+            mtrain_mape = np.mean(train_mape)
+            mtrain_rmse = np.mean(train_rmse)
 
-        mvalid_loss = np.mean(valid_loss)
-        mvalid_mape = np.mean(valid_mape)
-        mvalid_rmse = np.mean(valid_rmse)
-        his_loss.append(mvalid_loss)
+            mvalid_loss = np.mean(valid_loss)
+            mvalid_mape = np.mean(valid_mape)
+            mvalid_rmse = np.mean(valid_rmse)
+            his_loss.append(mvalid_loss)
 
-        log = 'Epoch: {:03d}, Train Loss: {:.4f}, Train MAPE: {:.4f}, Train RMSE: {:.4f}, Valid Loss: {:.4f}, Valid MAPE: {:.4f}, Valid RMSE: {:.4f}, Training Time: {:.4f}/epoch'
-        print(log.format(i, mtrain_loss, mtrain_mape, mtrain_rmse, mvalid_loss, mvalid_mape, mvalid_rmse, (t2 - t1)),flush=True)
+            log = 'Epoch: {:03d}, Train Loss: {:.4f}, Train MAPE: {:.4f}, Train RMSE: {:.4f}, Valid Loss: {:.4f}, Valid MAPE: {:.4f}, Valid RMSE: {:.4f}, Training Time: {:.4f}/epoch'
+            print(log.format(i, mtrain_loss, mtrain_mape, mtrain_rmse, mvalid_loss, mvalid_mape, mvalid_rmse, (t2 - t1)),flush=True)
+        else:
+            mtrain_loss = np.mean(train_loss)
+            mtrain_acc = np.mean(train_acc)
+            mtrain_precision = np.mean(train_precision)
+            mtrain_recall = np.mean(train_recall)
+
+            mvalid_loss = np.mean(valid_loss)
+            mvalid_acc = np.mean(valid_acc)
+            mvalid_precision = np.mean(valid_precision)
+            mvalid_recall = np.mean(valid_recall)
+            his_loss.append(mvalid_loss)
+
+            log = 'Epoch: {:03d}, Train Loss: {:.4f}, Train Accuracy: {:.4f}, Train Precision: {:.4f}, ' \
+                  'Train Recall: {:.4f}, Valid Loss: {:.4f}, Valid Accuracy: {:.4f}, Valid Precision: {:.4f}, ' \
+                  'Valid Recall: {:.4f}, Training Time: {:.4f}/epoch'
+            print(log.format(i, mtrain_loss, mtrain_acc, mtrain_precision, mtrain_recall, mvalid_loss, mvalid_acc,
+                             mvalid_precision, mvalid_recall, (t2 - t1)), flush=True)
+
         torch.save(engine.model.state_dict(), args.save+"_epoch_"+str(i)+"_"+str(round(mvalid_loss,2))+".pth")
     print("Average Training Time: {:.4f} secs/epoch".format(np.mean(train_time)))
     print("Average Inference Time: {:.4f} secs".format(np.mean(val_time)))
@@ -149,10 +200,19 @@ def main():
 
 
     outputs = []
-    realy = torch.Tensor(dataloader['y_test']).to(device)
-    realy = realy.transpose(1,3)[:,0,:,:]  # realy: (num_samples, num_nodes, output_length)
+    if args.predict_type == 'activity':
+        realy = torch.Tensor(dataloader['y_activity_test']).to(device)
+        realy = realy.transpose(1, 3)[:, 0, :, :]  # realy: (num_samples, num_nodes, output_length)
+        test_mask = torch.Tensor(dataloader['y_activity_mask_test']).to(device)
+        test_mask = test_mask.transpose(1, 3)[:, 0, :, :]
+    else:
+        realy = torch.Tensor(dataloader['y_churn_test']).to(device)
+        realy = torch.squeeze(realy)
+        test_mask = torch.Tensor(dataloader['y_churn_mask_test']).to(device)
+        test_mask = torch.squeeze(test_mask)
 
-    for iter, (x, y, p) in enumerate(dataloader['test_loader'].get_iterator()):
+
+    for iter, (x, y, p, mask) in enumerate(dataloader['test_loader'].get_iterator()):
         testx = torch.Tensor(x).to(device)
         testx = testx.transpose(1,3)
         testp = torch.Tensor(p).to(device)
@@ -168,22 +228,29 @@ def main():
     print("Training finished")
     print("The valid loss on best model is", str(round(his_loss[bestid],4)))
 
+    if args.predict_type == 'activity':
+        amae = []
+        amape = []
+        armse = []
+        for i in range(args.seq_length_y):  # 12: seq_length_y
+            pred = y_scaler.inverse_transform(yhat[:,:,i])
+            real = realy[:,:,i]
+            metrics = util.metric(pred,real)
+            log = 'Evaluate best model on test data for horizon {:d}, Test MAE: {:.4f}, Test MAPE: {:.4f}, Test RMSE: {:.4f}'
+            print(log.format(i+1, metrics[0], metrics[1], metrics[2]))
+            amae.append(metrics[0])
+            amape.append(metrics[1])
+            armse.append(metrics[2])
 
-    amae = []
-    amape = []
-    armse = []
-    for i in range(args.seq_length_y):  # 12: seq_length_y
-        pred = activity_scaler.inverse_transform(yhat[:,:,i])
-        real = realy[:,:,i]
-        metrics = util.metric(pred,real)
-        log = 'Evaluate best model on test data for horizon {:d}, Test MAE: {:.4f}, Test MAPE: {:.4f}, Test RMSE: {:.4f}'
-        print(log.format(i+1, metrics[0], metrics[1], metrics[2]))
-        amae.append(metrics[0])
-        amape.append(metrics[1])
-        armse.append(metrics[2])
+        log = 'On average over 12 horizons, Test MAE: {:.4f}, Test MAPE: {:.4f}, Test RMSE: {:.4f}'
+        print(log.format(np.mean(amae),np.mean(amape),np.mean(armse)))
+    else:
+        print(yhat.shape,realy.shape,test_mask.shape)###################################???????????
+        metrics = util.binary_metric(yhat,realy,mask=test_mask,threshold=threshold)
+        log = 'Test Accuracy: {:.4f}, Test Precision: {:.4f}, Test Recall: {:.4f}, Test F1_score: {:.4f}, ' \
+              'Test AUC: {:.4f}'
+        print(log.format(metrics[0],metrics[1],metrics[2],metrics[3],metrics[4]))
 
-    log = 'On average over 12 horizons, Test MAE: {:.4f}, Test MAPE: {:.4f}, Test RMSE: {:.4f}'
-    print(log.format(np.mean(amae),np.mean(amape),np.mean(armse)))
     torch.save(engine.model.state_dict(), args.save+"_exp"+str(args.expid)+"_best_"+str(round(his_loss[bestid],2))+".pth")
 
 

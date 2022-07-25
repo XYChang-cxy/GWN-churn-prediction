@@ -54,14 +54,15 @@ class gcn(nn.Module):
 class gwnet(nn.Module):
     # device: 训练设备
     # num_nodes: 节点数
-    # 删除 supports
-    def __init__(self, device, num_nodes, dropout=0.3, supports_len=2, gcn_bool=True, addaptadj=False, aptinit=None, in_dim=8,out_dim=18,residual_channels=32,dilation_channels=32,skip_channels=256,end_channels=512,kernel_size=2,blocks=4,layers=2):
+    # predict_type: 'activity' 'churn'
+    def __init__(self, device, num_nodes, dropout=0.3, supports_len=2, gcn_bool=True, addaptadj=False, aptinit=None, in_dim=8,out_dim=18,residual_channels=32,dilation_channels=32,skip_channels=256,end_channels=512,kernel_size=2,blocks=4,layers=2,predict_type='activity'):
         super(gwnet, self).__init__()
         self.dropout = dropout
         self.blocks = blocks  # 块数，一个块有多个layers
         self.layers = layers  # 层数
         self.gcn_bool = gcn_bool  # 是否使用GCN
         self.addaptadj = addaptadj  # 是否使用自适应邻接矩阵
+        self.predict_type = predict_type
 
         self.filter_convs = nn.ModuleList()  # TCN-a
         self.gate_convs = nn.ModuleList()  # TCN-b
@@ -214,6 +215,8 @@ class gwnet(nn.Module):
         x = F.relu(skip)
         x = F.relu(self.end_conv_1(x))
         x = self.end_conv_2(x)
+        if self.predict_type == 'churn':  # 流失预测时，需要添加sigmoid激活函数
+            x = torch.sigmoid(x)
         return x
 
 

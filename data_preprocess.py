@@ -149,7 +149,8 @@ def train_data_preprocess(repo_id,train_data_dir,input_chunk_weeks=12,churn_limi
     else:
         num_features = len(data_type_list)
     get_sample_data(repo_data_dir+'/sample_user_id.csv',week_data_dir,week_adj_dir,save_dir=input_data_dir,
-                    num_nodes=num_nodes,input_length=input_chunk_weeks,num_features=num_features)
+                    num_nodes=num_nodes,input_length=input_chunk_weeks,num_features=num_features,
+                    churn_limit_weeks=churn_limit_weeks)
 
 
 if __name__ == '__main__':
